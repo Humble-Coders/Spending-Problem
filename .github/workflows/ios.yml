@@ -1,0 +1,66 @@
+name: iOS
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME: NativeProof
+
+jobs:
+  preview:
+    name: Simulator preview
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create simulator
+        run: |
+          runtime=$(xcrun simctl list runtimes available --json \
+            | jq -c '[.runtimes[] | select(.platform == "iOS")] | max_by(.version | split(".") | map(tonumber))')
+          device_type=$(jq -r '[.supportedDeviceTypes[] | select(.productFamily == "iPhone" and (.name | endswith(" Pro")))] | max_by(.name) | .identifier' <<< "$runtime")
+          echo "Using $device_type on $(jq -r .name <<< "$runtime")"
+          udid=$(xcrun simctl create Preview "$device_type" "$(jq -r .identifier <<< "$runtime")")
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project "$SCHEME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "id=$UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -quiet
+
+      - name: Capture screenshots
+        run: |
+          app="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/$SCHEME.app"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+          xcrun simctl install "$UDID" "$app"
+          xcrun simctl launch "$UDID" "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
+          mkdir -p screenshots
+          sleep 8
+          xcrun simctl io "$UDID" screenshot screenshots/light.png
+          xcrun simctl ui "$UDID" appearance dark
+          sleep 3
+          xcrun simctl io "$UDID" screenshot screenshots/dark.png
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: screenshots
+          path: screenshots
